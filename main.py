@@ -5,16 +5,20 @@ This application provides a FastAPI interface to interact with OpenEMR's
 REST API and FHIR API endpoints.
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Query, Body
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi import FastAPI, HTTPException, Depends, Header, Query, Body, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.openapi.utils import get_openapi
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, List, Dict, Any
 import httpx
 import os
 from datetime import datetime, timedelta
 import secrets
+
+# Security scheme
+security = HTTPBearer(auto_error=False)
 
 app = FastAPI(
     title="OpenEMR API Interface",
@@ -25,17 +29,50 @@ app = FastAPI(
     - **OAuth 2.0 Authentication** - Secure token-based authentication
     - **FHIR R4 API** - Full FHIR Release 4 support
     - **Standard OpenEMR API** - Native OpenEMR REST endpoints
-    - **Automatic Documentation** - Interactive API docs (Swagger UI)
+    - **Interactive Swagger UI** - Test endpoints directly in your browser
     
-    ## Setup
-    1. Configure your OpenEMR server URL in environment variables
-    2. Register your OAuth client in OpenEMR
-    3. Use the authentication endpoints to get access tokens
-    4. Access protected endpoints with Bearer tokens
+    ## Quick Start
+    
+    1. **Configure Environment Variables:**
+       ```bash
+       OPENEMR_BASE_URL=https://your-openemr-server
+       OPENEMR_CLIENT_ID=your_client_id
+       OPENEMR_CLIENT_SECRET=your_client_secret
+       ```
+    
+    2. **Register OAuth Client:**
+       Use the `/oauth/register` endpoint to register your application
+    
+    3. **Get Access Token:**
+       Use `/oauth/token` endpoint with authorization code
+    
+    4. **Access Protected Endpoints:**
+       Include `Authorization: Bearer <token>` header in requests
+    
+    ## API Documentation
+    
+    - **Swagger UI:** Available at `/docs` (interactive testing)
+    - **ReDoc:** Available at `/redoc` (alternative documentation)
+    - **OpenAPI JSON:** Available at `/openapi.json`
     """,
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    openapi_url="/openapi.json",
+    tags_metadata=[
+        {
+            "name": "Authentication",
+            "description": "OAuth 2.0 authentication endpoints for token management and client registration.",
+        },
+        {
+            "name": "FHIR",
+            "description": "FHIR R4 API endpoints for healthcare data interoperability.",
+        },
+        {
+            "name": "Standard API",
+            "description": "Standard OpenEMR REST API endpoints for native operations.",
+        },
+    ],
 )
 
 # CORS middleware
@@ -58,71 +95,150 @@ REDIRECT_URI = os.getenv("OPENEMR_REDIRECT_URI", "http://localhost:8000/oauth/ca
 # In-memory token storage (use database in production)
 token_storage: Dict[str, Dict[str, Any]] = {}
 
-# OAuth2 scheme
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+# OAuth2 scheme (using HTTPBearer for Swagger UI compatibility)
+# Note: oauth2_scheme is defined but not currently used - kept for potential future use
 
 
 # Pydantic Models
 class TokenRequest(BaseModel):
-    grant_type: str = Field(..., description="Grant type: 'authorization_code' or 'refresh_token'")
-    code: Optional[str] = Field(None, description="Authorization code")
-    redirect_uri: Optional[str] = Field(None, description="Redirect URI")
-    refresh_token: Optional[str] = Field(None, description="Refresh token")
-    code_verifier: Optional[str] = Field(None, description="PKCE code verifier")
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "grant_type": "authorization_code",
+                "code": "abc123xyz",
+                "redirect_uri": "http://localhost:8000/oauth/callback",
+                "code_verifier": "optional_pkce_verifier"
+            }
+        }
+    )
+    grant_type: str = Field(..., description="Grant type: 'authorization_code' or 'refresh_token'", examples=["authorization_code", "refresh_token"])
+    code: Optional[str] = Field(None, description="Authorization code (required for authorization_code grant)")
+    redirect_uri: Optional[str] = Field(None, description="Redirect URI (must match registered URI)")
+    refresh_token: Optional[str] = Field(None, description="Refresh token (required for refresh_token grant)")
+    code_verifier: Optional[str] = Field(None, description="PKCE code verifier (for public clients)")
 
 
 class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "Bearer"
-    expires_in: Optional[int] = None
-    refresh_token: Optional[str] = None
-    scope: Optional[str] = None
-    id_token: Optional[str] = None
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "def456uvw",
+                "scope": "openid api:fhir patient/Patient.rs",
+                "id_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+            }
+        }
+    )
+    access_token: str = Field(..., description="OAuth 2.0 access token")
+    token_type: str = Field(default="Bearer", description="Token type")
+    expires_in: Optional[int] = Field(None, description="Token expiration time in seconds")
+    refresh_token: Optional[str] = Field(None, description="Refresh token for obtaining new access tokens")
+    scope: Optional[str] = Field(None, description="Granted scopes")
+    id_token: Optional[str] = Field(None, description="OpenID Connect ID token")
 
 
 class ClientRegistration(BaseModel):
-    client_name: str
-    redirect_uris: List[str]
-    scope: Optional[str] = None
-    token_endpoint_auth_method: Optional[str] = "client_secret_basic"
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "client_name": "My Healthcare App",
+                "redirect_uris": ["http://localhost:8000/oauth/callback"],
+                "scope": "openid api:fhir patient/Patient.rs user/Patient.rs",
+                "token_endpoint_auth_method": "client_secret_basic"
+            }
+        }
+    )
+    client_name: str = Field(..., description="Name of your application", examples=["My Healthcare App"])
+    redirect_uris: List[str] = Field(..., description="List of allowed redirect URIs", examples=[["http://localhost:8000/oauth/callback"]])
+    scope: Optional[str] = Field(None, description="Space-separated list of requested scopes", examples=["openid api:fhir patient/Patient.rs"])
+    token_endpoint_auth_method: Optional[str] = Field(default="client_secret_basic", description="Client authentication method", examples=["client_secret_basic", "client_secret_post", "none"])
 
 
 class PatientSearch(BaseModel):
-    name: Optional[str] = None
-    birthdate: Optional[str] = None
-    identifier: Optional[str] = None
-    _id: Optional[str] = None
-    _count: Optional[int] = 10
-    _sort: Optional[str] = None
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "John Doe",
+                "birthdate": "1990-01-01",
+                "identifier": "12345",
+                "_count": 10,
+                "_sort": "name"
+            }
+        }
+    )
+    name: Optional[str] = Field(None, description="Patient name to search", examples=["John Doe"])
+    birthdate: Optional[str] = Field(None, description="Patient birthdate (YYYY-MM-DD)", examples=["1990-01-01"])
+    identifier: Optional[str] = Field(None, description="Patient identifier", examples=["12345"])
+    id: Optional[str] = Field(None, alias="_id", description="Patient resource UUID")
+    count: Optional[int] = Field(default=10, alias="_count", description="Number of results to return", examples=[10, 20, 50])
+    sort: Optional[str] = Field(None, alias="_sort", description="Sort criteria (comma-separated, use - for descending)", examples=["name", "-birthdate"])
 
 
 class PatientCreate(BaseModel):
-    fname: str
-    lname: str
-    dob: str
-    sex: Optional[str] = "Unknown"
-    street: Optional[str] = None
-    city: Optional[str] = None
-    state: Optional[str] = None
-    postal_code: Optional[str] = None
-    phone_cell: Optional[str] = None
-    email: Optional[str] = None
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "fname": "John",
+                "lname": "Doe",
+                "dob": "1990-01-01",
+                "sex": "Male",
+                "street": "123 Main St",
+                "city": "Springfield",
+                "state": "IL",
+                "postal_code": "62701",
+                "phone_cell": "555-1234",
+                "email": "john.doe@example.com"
+            }
+        }
+    )
+    fname: str = Field(..., description="First name", examples=["John"])
+    lname: str = Field(..., description="Last name", examples=["Doe"])
+    dob: str = Field(..., description="Date of birth (YYYY-MM-DD)", examples=["1990-01-01"])
+    sex: Optional[str] = Field(default="Unknown", description="Sex", examples=["Male", "Female", "Other", "Unknown"])
+    street: Optional[str] = Field(None, description="Street address", examples=["123 Main St"])
+    city: Optional[str] = Field(None, description="City", examples=["Springfield"])
+    state: Optional[str] = Field(None, description="State/Province", examples=["IL"])
+    postal_code: Optional[str] = Field(None, description="Postal/ZIP code", examples=["62701"])
+    phone_cell: Optional[str] = Field(None, description="Cell phone number", examples=["555-1234"])
+    email: Optional[str] = Field(None, description="Email address", examples=["john.doe@example.com"])
 
 
 class ObservationSearch(BaseModel):
-    patient: Optional[str] = None
-    category: Optional[str] = None
-    code: Optional[str] = None
-    _count: Optional[int] = 10
-    _sort: Optional[str] = None
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "patient": "Patient/123",
+                "category": "vital-signs",
+                "code": "85354-9",
+                "_count": 10
+            }
+        }
+    )
+    patient: Optional[str] = Field(None, description="Patient reference (e.g., Patient/123)", examples=["Patient/123"])
+    category: Optional[str] = Field(None, description="Observation category", examples=["vital-signs", "laboratory"])
+    code: Optional[str] = Field(None, description="LOINC code for the observation", examples=["85354-9"])
+    count: Optional[int] = Field(default=10, alias="_count", description="Number of results to return")
+    sort: Optional[str] = Field(None, alias="_sort", description="Sort criteria")
 
 
 class EncounterSearch(BaseModel):
-    patient: Optional[str] = None
-    status: Optional[str] = None
-    date: Optional[str] = None
-    _count: Optional[int] = 10
-    _sort: Optional[str] = None
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "patient": "Patient/123",
+                "status": "finished",
+                "date": "2024-01-01",
+                "_count": 10
+            }
+        }
+    )
+    patient: Optional[str] = Field(None, description="Patient reference", examples=["Patient/123"])
+    status: Optional[str] = Field(None, description="Encounter status", examples=["planned", "in-progress", "finished"])
+    date: Optional[str] = Field(None, description="Encounter date (FHIR date format)", examples=["2024-01-01"])
+    count: Optional[int] = Field(default=10, alias="_count", description="Number of results to return")
+    sort: Optional[str] = Field(None, alias="_sort", description="Sort criteria")
 
 
 # Helper Functions
@@ -172,7 +288,28 @@ async def make_openemr_request(
 
 
 # Authentication Endpoints
-@app.get("/")
+@app.get(
+    "/",
+    tags=["Authentication"],
+    summary="API Information",
+    description="Root endpoint with API information and links to documentation.",
+    responses={
+        200: {
+            "description": "API information",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "name": "OpenEMR API Interface",
+                        "version": "1.0.0",
+                        "openemr_url": "https://localhost:9300",
+                        "docs": "/docs",
+                        "redoc": "/redoc"
+                    }
+                }
+            }
+        }
+    }
+)
 async def root():
     """Root endpoint with API information"""
     return {
@@ -180,17 +317,40 @@ async def root():
         "version": "1.0.0",
         "openemr_url": OPENEMR_BASE_URL,
         "docs": "/docs",
-        "redoc": "/redoc"
+        "redoc": "/redoc",
+        "openapi": "/openapi.json"
     }
 
 
-@app.get("/oauth/authorize")
+@app.get(
+    "/oauth/authorize",
+    tags=["Authentication"],
+    summary="OAuth 2.0 Authorization",
+    description="""
+    Initiates the OAuth 2.0 authorization code flow.
+    
+    Redirects users to OpenEMR's authorization endpoint to begin authentication.
+    After authorization, users will be redirected back to your `redirect_uri` with
+    an authorization code that can be exchanged for an access token.
+    
+    **Query Parameters:**
+    - `response_type`: Must be "code" (default)
+    - `client_id`: Your OAuth client ID
+    - `redirect_uri`: Your registered redirect URI
+    - `scope`: Space-separated list of requested scopes
+    - `state`: Optional state parameter for CSRF protection
+    """,
+    responses={
+        302: {"description": "Redirects to OpenEMR authorization page"},
+        400: {"description": "Invalid request (missing client_id)"}
+    }
+)
 async def oauth_authorize(
-    response_type: str = Query("code"),
-    client_id: Optional[str] = Query(None),
-    redirect_uri: Optional[str] = Query(None),
-    scope: Optional[str] = Query(None),
-    state: Optional[str] = Query(None)
+    response_type: str = Query("code", description="Response type (must be 'code')"),
+    client_id: Optional[str] = Query(None, description="OAuth client ID"),
+    redirect_uri: Optional[str] = Query(None, description="Redirect URI"),
+    scope: Optional[str] = Query(None, description="Requested scopes (space-separated)"),
+    state: Optional[str] = Query(None, description="State parameter for CSRF protection")
 ):
     """
     OAuth 2.0 Authorization Endpoint
@@ -223,10 +383,37 @@ async def oauth_authorize(
     return RedirectResponse(url=auth_url)
 
 
-@app.get("/oauth/callback")
+@app.get(
+    "/oauth/callback",
+    tags=["Authentication"],
+    summary="OAuth 2.0 Callback",
+    description="""
+    OAuth 2.0 callback endpoint that receives the authorization code
+    and automatically exchanges it for an access token.
+    
+    This endpoint is called by OpenEMR after user authorization.
+    """,
+    responses={
+        200: {
+            "description": "Token response",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "refresh_token": "def456uvw"
+                    }
+                }
+            }
+        },
+        400: {"description": "Invalid authorization code"},
+        401: {"description": "Authentication failed"}
+    }
+)
 async def oauth_callback(
-    code: str = Query(...),
-    state: Optional[str] = Query(None)
+    code: str = Query(..., description="Authorization code from OpenEMR"),
+    state: Optional[str] = Query(None, description="State parameter (if provided)")
 ):
     """
     OAuth 2.0 Callback Endpoint
@@ -267,7 +454,42 @@ async def oauth_callback(
             )
 
 
-@app.post("/oauth/token", response_model=TokenResponse)
+@app.post(
+    "/oauth/token",
+    response_model=TokenResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["Authentication"],
+    summary="Get OAuth 2.0 Access Token",
+    description="""
+    Exchange authorization code for access token or refresh an existing access token.
+    
+    **Grant Types:**
+    - `authorization_code`: Exchange authorization code for access token
+    - `refresh_token`: Refresh an expired access token
+    
+    **Response:**
+    Returns an access token that can be used to authenticate API requests.
+    Include the token in the `Authorization` header as `Bearer <token>`.
+    """,
+    responses={
+        200: {
+            "description": "Token response",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "refresh_token": "def456uvw",
+                        "scope": "openid api:fhir patient/Patient.rs"
+                    }
+                }
+            }
+        },
+        400: {"description": "Invalid request (missing required fields)"},
+        401: {"description": "Invalid authorization code or credentials"}
+    }
+)
 async def get_token(token_request: TokenRequest):
     """
     OAuth 2.0 Token Endpoint
@@ -313,7 +535,42 @@ async def get_token(token_request: TokenRequest):
             )
 
 
-@app.post("/oauth/register")
+@app.post(
+    "/oauth/register",
+    status_code=status.HTTP_201_CREATED,
+    tags=["Authentication"],
+    summary="Register OAuth 2.0 Client",
+    description="""
+    Register a new OAuth 2.0 client application with OpenEMR.
+    
+    This endpoint creates a new OAuth client that can be used to authenticate
+    and access OpenEMR APIs. The response includes `client_id` and `client_secret`
+    which should be stored securely.
+    
+    **Important:** The `client_secret` is only shown once. Save it securely!
+    """,
+    responses={
+        201: {
+            "description": "Client registered successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "client_id": "abc123xyz",
+                        "client_secret": "secret456",
+                        "client_id_issued_at": 1234567890,
+                        "client_secret_expires_at": 0,
+                        "redirect_uris": ["http://localhost:8000/oauth/callback"],
+                        "grant_types": ["authorization_code", "refresh_token"],
+                        "response_types": ["code"],
+                        "client_name": "My Healthcare App"
+                    }
+                }
+            }
+        },
+        400: {"description": "Invalid client metadata"},
+        422: {"description": "Validation error"}
+    }
+)
 async def register_client(registration: ClientRegistration):
     """
     Register OAuth 2.0 Client
@@ -324,7 +581,7 @@ async def register_client(registration: ClientRegistration):
         try:
             response = await client.post(
                 f"{OPENEMR_OAUTH_BASE}/registration",
-                json=registration.dict(),
+                json=registration.model_dump(),
                 headers={"Content-Type": "application/json"}
             )
             response.raise_for_status()
@@ -338,7 +595,33 @@ async def register_client(registration: ClientRegistration):
 
 
 # FHIR API Endpoints
-@app.get("/fhir/metadata")
+@app.get(
+    "/fhir/metadata",
+    tags=["FHIR"],
+    summary="Get FHIR Capability Statement",
+    description="""
+    Returns the FHIR metadata/capability statement.
+    
+    **No Authentication Required**
+    
+    This endpoint returns information about the FHIR server's capabilities,
+    including supported resources, operations, and search parameters.
+    """,
+    responses={
+        200: {
+            "description": "FHIR CapabilityStatement resource",
+            "content": {
+                "application/fhir+json": {
+                    "example": {
+                        "resourceType": "CapabilityStatement",
+                        "status": "active",
+                        "kind": "instance"
+                    }
+                }
+            }
+        }
+    }
+)
 async def get_capability_statement():
     """
     Get FHIR Capability Statement
@@ -348,10 +631,49 @@ async def get_capability_statement():
     return await make_openemr_request("GET", "/fhir/metadata")
 
 
-@app.get("/fhir/Patient")
+@app.get(
+    "/fhir/Patient",
+    tags=["FHIR"],
+    summary="Search Patients (FHIR)",
+    description="""
+    Search for patient resources using FHIR R4 search parameters.
+    
+    **Authentication Required:** Bearer token in Authorization header
+    
+    **Search Parameters:**
+    - `name`: Patient name
+    - `birthdate`: Date of birth
+    - `identifier`: Patient identifier
+    - `_id`: Resource UUID
+    - `_count`: Number of results (default: 10)
+    - `_sort`: Sort criteria
+    """,
+    responses={
+        200: {
+            "description": "Bundle of Patient resources",
+            "content": {
+                "application/fhir+json": {
+                    "example": {
+                        "resourceType": "Bundle",
+                        "type": "searchset",
+                        "total": 1,
+                        "entry": [{
+                            "resource": {
+                                "resourceType": "Patient",
+                                "id": "123",
+                                "name": [{"family": "Doe", "given": ["John"]}]
+                            }
+                        }]
+                    }
+                }
+            }
+        },
+        401: {"description": "Unauthorized - Missing or invalid token"}
+    }
+)
 async def search_patients(
     search: PatientSearch = Depends(),
-    authorization: Optional[str] = Header(None)
+    authorization: Optional[str] = Header(None, description="Bearer token for authentication")
 ):
     """
     Search for Patients (FHIR)
@@ -362,14 +684,44 @@ async def search_patients(
     if not token:
         raise HTTPException(status_code=401, detail="Authorization header with Bearer token required")
     
-    params = {k: v for k, v in search.dict().items() if v is not None}
+    params = {k: v for k, v in search.model_dump(by_alias=True).items() if v is not None}
     return await make_openemr_request("GET", "/fhir/Patient", token=token, params=params)
 
 
-@app.get("/fhir/Patient/{patient_id}")
+@app.get(
+    "/fhir/Patient/{patient_id}",
+    tags=["FHIR"],
+    summary="Get Patient by ID (FHIR)",
+    description="""
+    Retrieve a specific patient resource by ID.
+    
+    **Authentication Required:** Bearer token in Authorization header
+    
+    **Path Parameters:**
+    - `patient_id`: Patient resource ID (UUID)
+    """,
+    responses={
+        200: {
+            "description": "Patient resource",
+            "content": {
+                "application/fhir+json": {
+                    "example": {
+                        "resourceType": "Patient",
+                        "id": "123",
+                        "name": [{"family": "Doe", "given": ["John"]}],
+                        "birthDate": "1990-01-01",
+                        "gender": "male"
+                    }
+                }
+            }
+        },
+        401: {"description": "Unauthorized - Missing or invalid token"},
+        404: {"description": "Patient not found"}
+    }
+)
 async def get_patient(
     patient_id: str,
-    authorization: Optional[str] = Header(None)
+    authorization: Optional[str] = Header(None, description="Bearer token for authentication")
 ):
     """
     Get Patient by ID (FHIR)
@@ -383,10 +735,66 @@ async def get_patient(
     return await make_openemr_request("GET", f"/fhir/Patient/{patient_id}", token=token)
 
 
-@app.post("/fhir/Patient")
+@app.post(
+    "/fhir/Patient",
+    status_code=status.HTTP_201_CREATED,
+    tags=["FHIR"],
+    summary="Create Patient (FHIR)",
+    description="""
+    Create a new patient resource using FHIR R4 format.
+    
+    **Authentication Required:** Bearer token in Authorization header
+    
+    **Request Body:** FHIR Patient resource (JSON)
+    
+    **Example Patient Resource:**
+    ```json
+    {
+      "resourceType": "Patient",
+      "name": [{
+        "family": "Doe",
+        "given": ["John"]
+      }],
+      "birthDate": "1990-01-01",
+      "gender": "male",
+      "identifier": [{
+        "system": "http://hospital.example.org",
+        "value": "123456"
+      }]
+    }
+    ```
+    """,
+    responses={
+        201: {
+            "description": "Patient created successfully",
+            "content": {
+                "application/fhir+json": {
+                    "example": {
+                        "resourceType": "Patient",
+                        "id": "123",
+                        "name": [{"family": "Doe", "given": ["John"]}],
+                        "birthDate": "1990-01-01",
+                        "gender": "male"
+                    }
+                }
+            }
+        },
+        401: {"description": "Unauthorized - Missing or invalid token"},
+        400: {"description": "Bad request - Invalid patient data"}
+    }
+)
 async def create_patient(
-    patient: Dict[str, Any] = Body(...),
-    authorization: Optional[str] = Header(None)
+    patient: Dict[str, Any] = Body(
+        ...,
+        examples=[{
+            "resourceType": "Patient",
+            "name": [{"family": "Doe", "given": ["John"]}],
+            "birthDate": "1990-01-01",
+            "gender": "male",
+            "identifier": [{"system": "http://hospital.example.org", "value": "123456"}]
+        }]
+    ),
+    authorization: Optional[str] = Header(None, description="Bearer token for authentication")
 ):
     """
     Create Patient (FHIR)
@@ -414,7 +822,7 @@ async def search_observations(
     if not token:
         raise HTTPException(status_code=401, detail="Authorization header with Bearer token required")
     
-    params = {k: v for k, v in search.dict().items() if v is not None}
+    params = {k: v for k, v in search.model_dump(by_alias=True).items() if v is not None}
     return await make_openemr_request("GET", "/fhir/Observation", token=token, params=params)
 
 
@@ -432,7 +840,7 @@ async def search_encounters(
     if not token:
         raise HTTPException(status_code=401, detail="Authorization header with Bearer token required")
     
-    params = {k: v for k, v in search.dict().items() if v is not None}
+    params = {k: v for k, v in search.model_dump(by_alias=True).items() if v is not None}
     return await make_openemr_request("GET", "/fhir/Encounter", token=token, params=params)
 
 
@@ -558,10 +966,53 @@ async def list_patients(
     return await make_openemr_request("GET", "/api/patient", token=token, params=params)
 
 
-@app.post("/api/patient")
+@app.post(
+    "/api/patient",
+    status_code=status.HTTP_201_CREATED,
+    tags=["Standard API"],
+    summary="Create Patient (Standard API)",
+    description="""
+    Create a new patient using the Standard OpenEMR API format.
+    
+    **Authentication Required:** Bearer token in Authorization header
+    
+    **Required Fields:**
+    - `fname`: First name
+    - `lname`: Last name
+    - `dob`: Date of birth (YYYY-MM-DD)
+    
+    **Optional Fields:**
+    - `sex`: Male, Female, Other, or Unknown
+    - `street`, `city`, `state`, `postal_code`: Address information
+    - `phone_cell`: Phone number
+    - `email`: Email address
+    """,
+    responses={
+        201: {
+            "description": "Patient created successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "validationErrors": {},
+                        "internalErrors": [],
+                        "data": {
+                            "pid": "123",
+                            "fname": "John",
+                            "lname": "Doe",
+                            "dob": "1990-01-01",
+                            "sex": "Male"
+                        }
+                    }
+                }
+            }
+        },
+        401: {"description": "Unauthorized - Missing or invalid token"},
+        422: {"description": "Validation error - Missing required fields"}
+    }
+)
 async def create_patient_standard(
     patient: PatientCreate,
-    authorization: Optional[str] = Header(None)
+    authorization: Optional[str] = Header(None, description="Bearer token for authentication")
 ):
     """
     Create Patient (Standard API)
@@ -572,7 +1023,7 @@ async def create_patient_standard(
     if not token:
         raise HTTPException(status_code=401, detail="Authorization header with Bearer token required")
     
-    return await make_openemr_request("POST", "/api/patient", token=token, json_data=patient.dict())
+    return await make_openemr_request("POST", "/api/patient", token=token, json_data=patient.model_dump())
 
 
 @app.get("/api/patient/{pid}")
