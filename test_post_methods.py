@@ -312,7 +312,7 @@ class TestPostMethods:
                 headers={"Authorization": "Bearer test_token_123"}
             )
             
-            assert response.status_code == 200
+            assert response.status_code == 201  # Created
             data = response.json()
             assert data["resourceType"] == "Patient"
             assert "id" in data
@@ -400,7 +400,7 @@ class TestPostMethods:
                 headers={"Authorization": "Bearer test_token_123"}
             )
             
-            assert response.status_code == 200
+            assert response.status_code == 201  # Created
             # Verify the request was made with correct data
             call_args = mock_request.call_args
             assert call_args[1]["json_data"] == patient_data
@@ -433,7 +433,7 @@ class TestPostMethods:
                 headers={"Authorization": "Bearer test_token_123"}
             )
             
-            assert response.status_code == 200
+            assert response.status_code == 201  # Created
             data = response.json()
             assert "data" in data
             mock_request.assert_called_once()
@@ -455,7 +455,7 @@ class TestPostMethods:
                 headers={"Authorization": "Bearer test_token_123"}
             )
             
-            assert response.status_code == 200
+            assert response.status_code == 201  # Created
             # Verify required fields were sent
             call_args = mock_request.call_args
             sent_data = call_args[1]["json_data"]
@@ -518,7 +518,7 @@ class TestPostMethods:
                 headers={"Authorization": "Bearer test_token_123"}
             )
             
-            assert response.status_code == 200
+            assert response.status_code == 201  # Created
             # Verify all fields were sent
             call_args = mock_request.call_args
             sent_data = call_args[1]["json_data"]
@@ -545,7 +545,7 @@ class TestPostMethods:
             )
             
             # Should pass validation (422) but might fail at API level
-            assert response.status_code in [200, 400, 500]
+            assert response.status_code in [201, 400, 500]
 
 
 if __name__ == "__main__":
